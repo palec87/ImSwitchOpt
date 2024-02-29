@@ -10,6 +10,7 @@ class CameraTIS4:
         super().__init__()
         self.__logger = initLogger(self, tryInheritParent=True)
         ic4.Library.init(api_log_level=5, log_targets=1)
+        # TODO: define enum class
         self.pixel_formats = {'8bit': ic4.PixelFormat.Mono8,
                               '12bit': ic4.PixelFormat.Mono16,
                               '16bit': ic4.PixelFormat.Mono16}
@@ -83,14 +84,10 @@ class CameraTIS4:
 
     def stop_live(self):
         self.__logger.debug('stop live method called')
-        print('Streaming01?', self.cam.is_streaming)
-        print('sink attached01:', self.snapSink.is_attached)
         self.cam.acquisition_stop()  # stop imaging
 
     def grabFrame(self):
         image = self.snapSink.snap_single(int(1.2*self.exposure))
-        # fixing the leaks
-        # frame = image.numpy_wrap()[:, :, 0]
         frame = image.numpy_copy()[:, :, 0]
         image.release()
 

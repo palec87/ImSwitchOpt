@@ -193,6 +193,7 @@ class ScanWidgetOpt(NapariHybridWidget):
         self.scanPar['StartButton'] = QtWidgets.QPushButton('Start')
         self.scanPar['StopButton'] = QtWidgets.QPushButton('Stop')
         self.scanPar['PlotReportButton'] = QtWidgets.QPushButton('Report')
+        self.scanPar['PlotReportButton'].setEnabled(False)
         self.scanPar['SaveButton'] = QtWidgets.QCheckBox('Save')
         self.scanPar['SaveButton'].setCheckable(True)
         self.scanPar['noRamButton'] = QtWidgets.QCheckBox('no RAM')

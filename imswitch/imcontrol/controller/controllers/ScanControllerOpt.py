@@ -1,17 +1,18 @@
 from PyQt5.QtCore import pyqtSlot
 from PyQt5 import QtWidgets
 import pyqtgraph as pg
-from PyQt5.QtCore import QObject, QThread, pyqtSignal, QMutex
+from PyQt5.QtCore import QObject, QThread, pyqtSignal
 from scipy.fftpack import fft, ifft
 from scipy.interpolate import interp1d
 import tifffile as tif
 import os
+import json
 from datetime import datetime
 from collections import defaultdict
 import matplotlib
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-
+import pickle
 from functools import partial
 import numpy as np
 import time
@@ -80,11 +81,11 @@ class ScanControllerOpt(ImConWidgetController):
 
     # JA: method to add your metadata to recordings
     # TODO: metadata still not taken care of
-    def setSharedAttr(self, rotatorName, meta1, meta2, attr, value):
+    def setSharedAttr(self, attr, value):
         self.settingAttr = True
         try:
             self._commChannel.sharedAttrs[
-                (_attrCategory, rotatorName, meta1, meta2, attr)] = value
+                (_attrCategory, attr)] = value
         finally:
             self.settingAttr = False
 
@@ -129,7 +130,6 @@ class ScanControllerOpt(ImConWidgetController):
         print('going to start OPT')
         self.thread = QThread()
         self.thread.started.connect(self.startOpt)
-        # self.thread.finished.connect(self.printEnd)
         self.thread.finished.connect(self.thread.quit)
         self.thread.start()
 
@@ -138,10 +138,9 @@ class ScanControllerOpt(ImConWidgetController):
         """
         self.detector.startAcquisition()
         self.enableWidget(False)
-        # TODO: init time monitoring
-        # this will put timeflags at certain execution points
-        # which in the stopOpt will make a report and will be saved
-        # in the metadata.
+        self.optStack = None  # in order not to concatenate on the previous exp
+
+        # execution time monitoring
         self.timeMonitor = ExecOptMonitor()
         self.timeMonitor.addStart()
         if not self.isOptRunning:
@@ -157,7 +156,6 @@ class ScanControllerOpt(ImConWidgetController):
         finish to post_step_mock()
         """
         self._logger.info('Preparing Mock experiment')
-        # self.mtx = QMutex()
         self._master.rotatorsManager[
             self.__rotators[self.motorIdx]].sigOptStepDone.connect(
                                                     self.post_step_mock)
@@ -188,12 +186,10 @@ class ScanControllerOpt(ImConWidgetController):
         self._logger.info('in the opt mock post step')
         self.timeMonitor.addStamp('snap', self.__currentStep, 'beg')
         self.frame = self.demo.sinogram[self.__currentStep]
-        print('self.frame', self.frame.shape)
         if self.noRAM:  # no volume in napari, only last frame
             self.sigImageReceived.emit('Last Frame', self.frame)
         else:
             self.optStack = self.demo.sinogram[:self.__currentStep+1, :, :]
-            print('a', self.optStack.shape)
             self.sigImageReceived.emit('OPT stack', self.optStack)
         self.timeMonitor.addStamp('plots', self.__currentStep, 'beg')
         self.handleSave()
@@ -235,8 +231,79 @@ class ScanControllerOpt(ImConWidgetController):
         self.thread.quit()
         self._master.rotatorsManager[
             self.__rotators[self.motorIdx]].sigOptStepDone.disconnect()
-        self._logger.info("OPT stopped.")
         self.timeMonitor.makeReport()
+
+        # metadata saving
+        self.updateSharedAttrs2()
+        if self.saveOpt:
+            filePath = self.getSaveFilePath(
+                            subfolder=self.saveSubfolder,
+                            filename='metadata',
+                            extension='.pkl')
+            # metadata dictionary
+            # toSave = self._commChannel.sharedAttrs._data
+            try:
+                with open(filePath, 'wb') as fp:
+                    # I think this is an intended use
+                    # but since keys are tuples it cannot be serialized
+                    # fp.write(self._commChannel.sharedAttrs.getJSON())
+                    pickle.dump(self.metadata, fp)
+            except Exception as e:
+                print('WHAAAT', e)
+
+        self._logger.info("OPT stopped.")
+
+    def updateSharedAttrs2(self):
+        self.metadata = {}
+        self.metadata['opt n steps'] = self.__optSteps
+        self.metadata['opt steps'] = self.opt_steps
+        self.metadata['rotator'] = self._widget.scanPar['Rotator'].currentText()
+        self.metadata['live recon'] = self.liveRecon
+        self.metadata['mock checked'] = self._widget.scanPar['MockOpt'].isChecked()
+        self.metadata['exec report data'] = dict(self.timeMonitor.report)
+        self.metadata['exec report out'] = self.timeMonitor.reportOut
+        try:
+            self.metadata['exp start'] = self.timeMonitor.report['start']
+            self.metadata['exp stop'] = self.timeMonitor.report['end']
+        except:
+            pass
+
+        if self.signalStability:
+            self.metadata['stability'] = self.signalStability.intensity
+
+        if self.liveRecon and not self._widget.scanPar['MockOpt'].isChecked():
+            self.metadata['live recon array'] = self.currentRecon.output
+
+    def updateSharedAttrs(self):
+        self.setSharedAttr('opt n steps', self.__optSteps)
+        self.setSharedAttr('opt steps', self.opt_steps)
+        self.setSharedAttr('rotator',
+                           self._widget.scanPar['Rotator'].currentText())
+        self.setSharedAttr('live recon', self.liveRecon)
+        self.setSharedAttr('mock checked',
+                           self._widget.scanPar['MockOpt'].isChecked())
+        self.setSharedAttr('exec report data', self.timeMonitor.report)
+        self.setSharedAttr('exec report out', self.timeMonitor.reportOut)
+        try:
+            self.setSharedAttr('exp start',
+                               self.timeMonitor.report['start'])
+            self.setSharedAttr('exp stop',
+                               self.timeMonitor.report['end'])
+        except:
+            pass
+
+        if self.signalStability:
+            self.setSharedAttr('stability',
+                               self.signalStability.intensity)
+
+        if self.liveRecon and not self._widget.scanPar['MockOpt'].isChecked():
+            self.setSharedAttr('live recon array',
+                               self.currentRecon.output)
+
+    def remap_keys(self, mapping):
+        # json.dumps(remap_keys({(1, 2): 'foo'}))
+        # '[{"value": "foo", "key": [1, 2]}]'
+        return [{'key': k, 'value': v} for k, v in mapping.items()]
 
     def plotReport(self):
         self.SW = SecondWindow(self.timeMonitor.reportOut)
@@ -258,9 +325,16 @@ class ScanControllerOpt(ImConWidgetController):
         if self.noRAM:  # no volume in napari, only last frame
             self.sigImageReceived.emit('Last Frame', self.frame)
         else:  # volume in RAM and displayed in napari
-            self.allFrames.append(self.frame)
-
-            self.optStack = np.array(self.allFrames)
+            # TODO: array needs to be just concatenated
+            # much better but noRAM option still saves some time
+            try:
+                self.optStack = np.concatenate((self.optStack,
+                                                self.frame[np.newaxis, :]),
+                                               )
+            except ValueError:
+                self.optStack = np.stack((self.optStack, self.frame))
+            except AttributeError:
+                self.optStack = np.array(self.frame)
             self.sigImageReceived.emit('OPT stack', self.optStack)
 
     def handleSave(self):
@@ -442,7 +516,6 @@ class ScanControllerOpt(ImConWidgetController):
 
     def updateLiveReconIdx(self) -> None:
         """ Get camera line index for the live reconstruction. """
-        print('updateLiveReconIdx call')
         self.reconIdx = self._widget.getLiveReconIdx()
 
     def setLiveReconIdx(self, value: int):
@@ -939,6 +1012,7 @@ class DemoData(QObject):
         super(QObject, self).__init__()
         self.size = resolution  # int
         self.radon = Get_radon(self.size)
+        # TODO: make it into progress pop-up progress bar.
         self.radon.progress.connect(self.printProgress)
 
         s = self.radon.get_sinogram()
@@ -983,7 +1057,6 @@ class Get_radon(QObject):
         msg.setText("Generating data for you")
         # msg.setStandardButtons(QtWidgets.QMessageBox.Ok)
         retval = msg.exec_()
-        print(retval)
         return retval
 
 
@@ -1233,6 +1306,8 @@ def _array_to_params(array):
             tmp[k] = array[i, j]
         out.append(tmp)
     return out
+
+_attrCategory = 'ScanInfo'
 
 # Copyright (C) 2020-2021 ImSwitch developers
 # This file is part of ImSwitch.
